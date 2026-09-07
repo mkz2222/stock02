@@ -12,6 +12,7 @@ import re
 import sqlite3
 import sys
 import time
+import uuid
 try:
     import tomllib
 except ImportError:
@@ -60,7 +61,10 @@ def read_rules(path):
         text = blocks[0]
     elif Path(path).suffix.lower() != ".txt":
         raise ValueError("Rules file must be .md or .txt")
-    config = tomllib.loads(text)
+    return validate_config(tomllib.loads(text))
+
+
+def validate_config(config, allow_empty=False):
     if set(config) - {"settings", "watch"}:
         raise ValueError("Unknown top-level configuration key")
     settings = {"cooldown_hours": 24, "max_quote_age_minutes": 20,
@@ -76,7 +80,9 @@ def read_rules(path):
     if settings["crypto_location"] not in ("us", "us-1", "eu-1"):
         raise ValueError("Unsupported crypto_location")
     rules = config.get("watch", [])
-    if not rules:
+    if not isinstance(rules, list):
+        raise ValueError("watch must be a list")
+    if not rules and not allow_empty:
         raise ValueError("At least one [[watch]] entry is required")
     ids = set()
     for rule in rules:
@@ -218,6 +224,10 @@ def database(path):
         CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, fetched REAL, payload TEXT);
         CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY, rule_id TEXT,
             sent REAL, message TEXT);
+        CREATE TABLE IF NOT EXISTS cloud_cache (key TEXT PRIMARY KEY, payload TEXT);
+        CREATE TABLE IF NOT EXISTS run_history (id TEXT PRIMARY KEY, payload TEXT);
+        CREATE TABLE IF NOT EXISTS cloud_outbox (id TEXT PRIMARY KEY, destination TEXT,
+            payload TEXT);
     """)
     return db
 
@@ -287,13 +297,19 @@ def evaluate(db, rule, source, price, target, quoted, now, cooldown, send, dry_r
             with db:
                 db.execute("INSERT INTO alerts(rule_id,sent,message) VALUES (?,?,?)", (rule["id"], last, message))
                 db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (rule["id"], fingerprint, int(armed), last))
-            return
+            return "alert_sent"
     if not dry_run:
         with db:
             db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (rule["id"], fingerprint, int(armed), last))
+    if not inside:
+        return "outside_range"
+    if not armed:
+        return "already_notified"
+    return "would_alert" if eligible else "cooldown"
 
 
-def run(settings, rules, db, provider, send, dry_run=False):
+def run(settings, rules, db, provider, send, dry_run=False, results=None):
+    results = results if results is not None else []
     failed = 0
     stock_open = None
     if any(r["market"] == "stock" for r in rules):
@@ -304,7 +320,11 @@ def run(settings, rules, db, provider, send, dry_run=False):
             failed += 1
     quotes = {}
     for rule in rules:
+        result = {"rule_id": rule["id"], "symbol": rule["symbol"],
+                  "market": rule["market"], "checked_at": datetime.now(UTC).isoformat()}
+        results.append(result)
         if rule["market"] == "stock" and not stock_open:
+            result["status"] = "market_closed" if stock_open is False else "market_clock_error"
             LOG.info("%s skipped: stock session closed or unverified", rule["id"])
             continue
         try:
@@ -318,9 +338,13 @@ def run(settings, rules, db, provider, send, dry_run=False):
                 raise ValueError("Quote is stale or timestamp is in the future")
             target = target_value(rule, provider, db, now)
             LOG.info("%s price=%.4f target=%.4f", rule["id"], price, target)
-            evaluate(db, rule, provider.source(rule["market"]), price, target, quoted,
-                     now, settings["cooldown_hours"], send, dry_run)
+            result.update(price=price, target=target, quoted_at=quoted.isoformat(),
+                          distance_percent=(price / target - 1) * 100,
+                          source=provider.source(rule["market"]))
+            result["status"] = evaluate(db, rule, provider.source(rule["market"]), price, target, quoted,
+                                        now, settings["cooldown_hours"], send, dry_run)
         except Exception as exc:
+            result.update(status="error", error=str(exc))
             LOG.error("%s failed: %s", rule["id"], exc)
             failed += 1
     LOG.info("Check complete: %d rules, %d errors", len(rules), failed)
@@ -332,6 +356,7 @@ def main():
     parser.add_argument("--rules", type=Path, default=Path("watchlist.md"))
     parser.add_argument("--db", type=Path, default=Path("state/monitor.sqlite3"))
     parser.add_argument("--validate", action="store_true", help="Validate file offline and exit")
+    parser.add_argument("--seed-cloud", action="store_true", help="Import missing file rules into Supabase and exit")
     parser.add_argument("--dry-run", action="store_true", help="Fetch live data without sending or changing alert state")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -350,11 +375,35 @@ def main():
                 except BlockingIOError:
                     LOG.info("Another check is running; skipping")
                     return 0
-            send = None if args.dry_run else notifier()
-            provider = Alpaca(settings)
+            send = None if args.dry_run or args.seed_cloud else notifier()
             db = database(args.db)
             try:
-                return run(settings, rules, db, provider, send, args.dry_run)
+                from cloud_sync import CloudSync
+                cloud = CloudSync.from_environment(db)
+                if args.seed_cloud:
+                    if not cloud:
+                        raise ValueError("Configure Supabase before --seed-cloud")
+                    cloud.seed(rules)
+                    return 0
+                rule_source = "file"
+                if cloud:
+                    settings, rules, rule_source = cloud.load_rules(settings, rules, validate_config)
+                provider = Alpaca(settings)
+                started = datetime.now(UTC).isoformat()
+                results = []
+                code = run(settings, rules, db, provider, send, args.dry_run, results)
+                if not args.dry_run:
+                    event = {"id": str(uuid.uuid4()), "device_id": os.environ.get("STOCKWATCH_DEVICE_ID", "raspberrypi"),
+                             "started_at": started, "finished_at": datetime.now(UTC).isoformat(),
+                             "status": "success" if code == 0 else "error", "rule_source": rule_source,
+                             "results": results}
+                    with db:
+                        db.execute("INSERT INTO run_history VALUES (?,?)", (event["id"], json.dumps(event)))
+                        if cloud:
+                            cloud.enqueue(event)
+                    if cloud:
+                        cloud.flush()
+                return code
             finally:
                 db.close()
     except Exception as exc:

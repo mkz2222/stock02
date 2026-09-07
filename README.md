@@ -1,41 +1,70 @@
-# 树莓派股票 / Crypto 提醒程序
+# Stockwatch
 
-Python 3.11+，仅标准库，SQLite 保存状态。systemd 每小时启动一次，读取文件、检查、发送提醒后退出。程序只读取行情，不下单。
+An hourly US stock and cryptocurrency monitor for Raspberry Pi. Python evaluates fixed-price or moving-average rules, sends Telegram/Pushover notifications, and stores state in SQLite. Optional Supabase sync lets you edit the watchlist remotely and inspect activity before adding a Netlify dashboard.
 
-旧版 Raspberry Pi 的 Python 3.6 也支持，需单独安装 `requirements-legacy.txt` 中的依赖；使用 `deploy/stockwatch-legacy.service`，详见文末。
+## Architecture
 
-## 第一版行为
+- **Raspberry Pi + systemd:** runs the monitor once each hour and after boot.
+- **SQLite:** price history cache, alert deduplication, completed run history, cached cloud rules, and pending cloud uploads.
+- **Supabase (optional):** authoritative watchlist, uploaded run results, and notification history.
+- **Phone:** Telegram or Pushover notifications.
 
-- 每次读取指定的 `watchlist.md`（一个 TOML 代码块）或 `.txt`（直接写 TOML）。不扫描其他文件，不用 AI 解释自由文本。路径固定，避免读错文件。
-- 默认目标上下 5%，含边界；首次运行已在范围内也提醒。连续停留在范围内不重复。
-- 检测到离开后重新准备提醒；再次进入受默认 24 小时冷却限制。冷却期间进入并一直停留，会在冷却结束后的首次检查提醒。
-- SQLite 保存状态，重启保留。修改目标、范围、标的或数据源会重置规则状态；note 不会。删除规则保留历史，复用旧 id 会恢复旧状态，建议新规则使用新 id。
-- 美股仅在 Alpaca clock 确认正常交易时段时检查；节假日、提前收盘由 clock 处理。Crypto 每天 24 小时检查。
-- 一小时采样可能错过两次检查之间的短暂触价。重启后不补发停机期间的历史触价。
-- 过期行情、历史不足、接口错误均不触发价格提醒；记录日志，其他规则继续。通知失败不消耗提醒状态，下次运行重新尝试。
-- 外部通知和本地数据库不能原子提交：服务已接收但网络超时/进程崩溃时，下次可能重复发送，无法保证严格恰好一次。
+Python 3.11+ uses the standard library only. Python 3.6–3.10 needs the pinned dependencies in `requirements-legacy.txt`. Legacy support has been tested on ARMv7 Raspbian Stretch with Python 3.6.5 and systemd 232; a newer Raspberry Pi OS is recommended for ongoing maintenance.
 
-## 数据来源和均线
+## Alert behavior
 
-第一版统一使用 Alpaca HTTP API，需要设置 Alpaca **Paper 账户 API key**（clock 使用 paper API）。无需开通自动交易功能；本程序不调用交易接口。
+A target of 100 with `band_percent = 5` triggers between 95 and 105, including boundaries. An initial observation inside the range triggers once. Remaining inside does not trigger again, even after 24 hours. An observed exit rearms the rule; a subsequent entry can alert after the 24-hour cooldown. An entry during cooldown is deferred while the price remains inside.
 
-- 美股默认 IEX，实时数据不是全市场合并行情。`stock_feed = "sip"` 需要相应订阅权限。
-- Crypto 默认 `crypto_location = "us"`（Alpaca）；也允许文档列出的 `us-1` / `eu-1`（Kraken）。历史长度和账户权限需实际验证。
-- 不是 TradingView 数据接口，不承诺与 TradingView 完全一致。请比对图表交易所、交易对、复权及周期边界。
-- `target = 100` 是固定价格；`target = "SMA_200W"` 是 200 周简单均线；`"SMA_200D"` 是 200 日简单均线。支持 1–999 个周期，不支持 EMA。
-- 使用供应商周/日 K 线收盘价，美股拆股复权、不调整分红。美股周期边界按纽约时间，Crypto 按 UTC，周一开始。排除当前未完成周期；周线到下周一才纳入上一周，不在周五即时切换。
-- 周线检查连续性和最新一周，缺少足够历史则拒绝计算。新上市币或不同 crypto 数据源不一定有 200 周记录，不会用少量数据冒充。
-- 缓存历史 K 线最多 24 小时；跨周期立即重取。定期完整刷新所需窗口以更新复权。缓存期间公司行动调整可能尚未反映。
+State survives restarts. Changing the symbol, market, target, band, or data source resets that rule's state. Changing the note does not. Use a new ID for an unrelated rule; deleting a rule does not erase its historical state.
 
-官方接口参考（2026-09-06 查阅）：
+Hourly polling can miss brief touches between checks. Network timeouts after a notification is accepted can cause a duplicate on retry; exactly-once delivery across an external service and SQLite is not guaranteed.
 
-- [美股历史 K 线](https://docs.alpaca.markets/us/v1.4.2/reference/stockbars)
-- [Crypto 历史 K 线](https://docs.alpaca.markets/us/reference/cryptobars-1)
-- [行情覆盖和权限](https://docs.alpaca.markets/us/docs/market-data-faq)
+Stocks are checked only when Alpaca's paper API clock confirms an open regular session. Crypto is checked around the clock. Stale quotes and insufficient history are rejected. One rule failing does not stop the other rules.
 
-## 树莓派安装
+## Watchlist
 
-使用 Raspberry Pi OS Bookworm 或更新版本，确认 `python3 --version` 至少为 3.11。将本项目复制到树莓派某个目录，进入该目录再执行：
+`watchlist.md` contains exactly one fenced TOML block. A `.txt` file contains the same TOML without fences. The program reads the explicitly selected file every run; it does not interpret free-form prose.
+
+```toml
+[settings]
+cooldown_hours = 24
+max_quote_age_minutes = 20
+stock_feed = "iex"
+crypto_location = "us"
+
+[[watch]]
+id = "apple-target"
+market = "stock"
+symbol = "AAPL"
+target = 100
+band_percent = 5
+note = "Example only: replace with your own target"
+
+[[watch]]
+id = "ether-weekly"
+market = "crypto"
+symbol = "ETH/USD"
+target = "SMA_200W"
+band_percent = 5
+```
+
+Supported targets are a positive price or `SMA_NW` / `SMA_ND`, with N from 1 to 999. SMA uses completed bars only. Stock history is split-adjusted, not dividend-adjusted. Weekly boundaries use Monday, New York time for stocks and UTC for crypto; the previous week is included after the next Monday begins. History is refreshed at period boundaries and at least daily to pick up adjustments. Short or missing weekly history is rejected.
+
+Alpaca IEX is a single-exchange stock feed, not consolidated market data. SIP requires appropriate subscription access. Crypto locations `us`, `us-1`, and `eu-1` depend on provider support and history availability. This is not a TradingView data integration; match exchange, pair, adjustments, and period boundaries when comparing values.
+
+## Local checks
+
+```bash
+python3 monitor.py --rules watchlist.md --validate
+python3 -m unittest -v
+python3 monitor.py --rules watchlist.md --dry-run
+```
+
+`--validate` is offline. `--dry-run` fetches real data and may refresh caches, but does not send notifications, change alert state, or upload run history. It does not test notification credentials.
+
+## Raspberry Pi installation
+
+On Raspberry Pi OS with Python 3.11+, copy or clone this repository and run from its directory:
 
 ```bash
 sudo apt update
@@ -43,98 +72,123 @@ sudo apt install -y python3 tzdata ca-certificates
 sudo useradd --system --user-group --home-dir /var/lib/stockwatch --no-create-home --shell /usr/sbin/nologin stockwatch
 sudo install -d /opt/stockwatch
 sudo install -d -m 0750 -o root -g stockwatch /etc/stockwatch
-sudo install -m 0644 monitor.py /opt/stockwatch/monitor.py
+sudo install -d -m 0700 -o stockwatch -g stockwatch /var/lib/stockwatch
+sudo install -m 0644 monitor.py cloud_sync.py /opt/stockwatch/
 sudo install -m 0640 -o root -g stockwatch watchlist.md /etc/stockwatch/watchlist.md
 sudo install -m 0600 deploy/stockwatch.env.example /etc/stockwatch.env
-sudo install -m 0644 deploy/stockwatch.service /etc/systemd/system/stockwatch.service
-sudo install -m 0644 deploy/stockwatch.timer /etc/systemd/system/stockwatch.timer
+sudo install -m 0644 deploy/stockwatch.service deploy/stockwatch.timer /etc/systemd/system/
 ```
 
-如果 stockwatch 用户已经存在，跳过 useradd。再次部署代码只复制 monitor.py，**不要覆盖已修改的配置和密钥文件**。
+Skip `useradd` if the account already exists. On updates, preserve your configuration, credentials, and SQLite database; do not overwrite them with examples.
 
-编辑目标和凭据：
-
-```bash
-sudo nano /etc/stockwatch/watchlist.md
-sudo nano /etc/stockwatch.env
-```
-
-通知二选一：
-
-- Telegram：用官方 @BotFather 创建 bot，将 token 填进 `TELEGRAM_BOT_TOKEN`。先从手机向自己的 bot 发送 `/start`，通过 Telegram Bot API 的 `getUpdates` 获取自己的 `message.chat.id`，填 `TELEGRAM_CHAT_ID`。不要把 token 放进监控文件或共享截图。
-- Pushover：安装并注册手机应用，创建 API application，将应用 token 和个人 user key 填入示例配置对应项；`NOTIFY_CHANNEL=pushover`。
-
-## 启用前验证
-
-离线检查格式，不调用任何 API：
-
-```bash
-python3 monitor.py --rules watchlist.md --validate
-python3 -m unittest -v
-```
-
-在树莓派用临时 systemd 服务加载同一份凭据做实时试运行：只打印潜在提醒，不发送，也不改变提醒状态（会缓存行情）。
-
-```bash
-sudo systemd-run --unit=stockwatch-preview --wait --pipe --collect \
-  -p User=stockwatch -p Group=stockwatch \
-  -p EnvironmentFile=/etc/stockwatch.env \
-  -p StateDirectory=stockwatch \
-  /usr/bin/python3 /opt/stockwatch/monitor.py \
-  --rules /etc/stockwatch/watchlist.md \
-  --db /var/lib/stockwatch/monitor.sqlite3 --dry-run
-```
-
-确认后启用定时任务，并立即检查一次（符合条件会发通知）：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now stockwatch.timer
-sudo systemctl start stockwatch.service
-systemctl list-timers stockwatch.timer
-journalctl -u stockwatch.service -n 100 --no-pager
-```
-
-`Type=oneshot` 完成后显示 inactive 是正常的；查看 timer 是否 active。开机约两分钟检查一次，随后每个整点附近运行。`Persistent=true` 会在重新启用时补一次错过的计划，不补所有小时。失败时服务返回非零，下个整点重新尝试；没有无限重启循环。
-
-首次验证手机推送可临时添加一个目标接近当前价的独立测试规则，手动启动服务，确认收到后删除测试规则。`--dry-run` 不验证推送凭据。
-
-## 修改和维护
-
-- 修改 `/etc/stockwatch/watchlist.md` 后，下一次运行生效，无需重启 timer。文件有语法错误则本轮整份停止并写日志，修正后下轮恢复。建议先 `--validate`。
-- 如使用 `.txt`，复制 `watchlist.example.txt` 到 `/etc/stockwatch/watchlist.txt`，并将服务 `ExecStart` 中的 `--rules` 路径改为它；运行 `sudo systemctl daemon-reload`。
-- 检查间隔由 timer 决定。例如每两小时改为 `OnCalendar=*-*-* 00/2:00:00`，然后 `sudo systemctl daemon-reload` 和 `sudo systemctl restart stockwatch.timer`。
-- SQLite 位于 `/var/lib/stockwatch/monitor.sqlite3`，配置和数据库都要保留。备份时先停止 timer 并等待 service 结束，再复制数据库，完成后启动 timer。
-- 查看日志：`journalctl -u stockwatch.service --since today`。本版尚无独立外部掉线监控；树莓派断电、断网或通知渠道故障不能靠同一程序可靠通知手机。
-- 停止：`sudo systemctl disable --now stockwatch.timer`；若本轮仍在运行，另执行 `sudo systemctl stop stockwatch.service`。
-
-## 验证范围
-
-测试覆盖配置校验、200 周 SMA、缺失周线、重启去重、再次进入和冷却、通知失败、dry-run、历史分页、过期行情和美股接口失败隔离。未配置真实 API 凭据时无法验证账户数据权限、200 周历史覆盖或实际手机送达。systemd 文件需要在树莓派 Linux 上完成实际启用验证。
-
-## 旧版 Raspberry Pi 部署
-
-已在 Raspbian Stretch、ARMv7、Python 3.6.5、systemd 232 上通过 10 项测试和规则校验。兼容改动不升级系统 Python；长期维护建议迁移到更新的 Raspberry Pi OS。
-
-在应用独立目录安装固定版本依赖：
+For a legacy Pi with Python at `/usr/local/bin/python3.6`, additionally install the application-local dependencies and the compatible unit:
 
 ```bash
 sudo /usr/local/bin/python3.6 -m pip install --target /opt/stockwatch/vendor -r requirements-legacy.txt
-sudo install -d -m 0700 -o stockwatch -g stockwatch /var/lib/stockwatch
 sudo install -m 0644 deploy/stockwatch-legacy.service /etc/systemd/system/stockwatch.service
-sudo systemctl daemon-reload
 ```
 
-旧版 unit 使用 `/usr/local/bin/python3.6` 和 `/opt/stockwatch/vendor`，手动创建状态目录，避免 systemd 232 不支持 `StateDirectory` 的问题。其余配置路径与现代版本相同。
-
-部署后先在 Pi 的交互式 SSH 终端填写凭据和真实目标，不要把密钥粘贴到聊天或提交到 Git：
+Edit credentials and actual targets in your own SSH terminal:
 
 ```bash
 sudo nano /etc/stockwatch.env
 sudo nano /etc/stockwatch/watchlist.md
+```
+
+Use Alpaca **paper-account** API credentials for `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. The program does not place orders.
+
+For Telegram, set `NOTIFY_CHANNEL=telegram`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. Create a bot with official @BotFather, message it `/start`, and obtain your chat ID through its Bot API `getUpdates` response. For Pushover, set `NOTIFY_CHANNEL=pushover`, `PUSHOVER_APP_TOKEN`, and `PUSHOVER_USER_KEY`.
+
+```bash
+sudo systemctl daemon-reload
 sudo systemctl start stockwatch.service
 sudo journalctl -u stockwatch.service -n 50 --no-pager
 sudo systemctl enable --now stockwatch.timer
+systemctl list-timers stockwatch.timer
 ```
 
-密钥文件仅 root 可读，systemd 会加载。示例凭据和示例目标尚未替换时，应保持 timer 禁用。旧版 systemd 的临时试运行命令请省略现代示例中的 `--collect` 和 `StateDirectory`，改用 `-p Environment=PYTHONPATH=/opt/stockwatch/vendor` 及实际 Python 3.6 路径。
+A successful oneshot service becomes inactive after finishing; the timer stays active. Runs occur within approximately one minute of each hour and about two minutes after boot. Failures retry at the next scheduled run, not in an unlimited restart loop.
+
+## Supabase setup
+
+1. Choose a Supabase project and run `supabase/schema.sql` once in its SQL Editor. This is a bootstrap script, not a recorded CLI migration. It creates only the three `stockwatch_*` tables; if those names already exist, review them before applying.
+2. In `/etc/stockwatch.env`, add:
+
+```text
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SECRET_KEY=sb_secret_your_server_key
+STOCKWATCH_DEVICE_ID=raspberrypi
+```
+
+Keep the secret key only in this root-readable file. Never commit it or expose it in a dashboard/browser. The integration uses the REST Data API and the server-side `apikey` header; no modern Supabase Python SDK is required on the legacy Pi.
+
+3. Import the current file rules **before the next normal cloud-enabled run**. Stop the timer while setting this up, and wait for any running service to finish. For the deployed legacy Pi:
+
+```bash
+sudo systemctl stop stockwatch.timer
+sudo systemd-run --unit=stockwatch-import --wait \
+  -p User=stockwatch -p Group=stockwatch \
+  -p EnvironmentFile=/etc/stockwatch.env \
+  -p Environment=PYTHONPATH=/opt/stockwatch/vendor \
+  /usr/local/bin/python3.6 /opt/stockwatch/monitor.py \
+  --rules /etc/stockwatch/watchlist.md \
+  --db /var/lib/stockwatch/monitor.sqlite3 --seed-cloud
+```
+
+On a modern Pi, use `/usr/bin/python3` and omit the vendor environment property. The import inserts missing IDs only and does not overwrite existing cloud edits. Check the command exit status and SQL/Table Editor results before proceeding.
+
+4. Start a check, inspect logs for `Loaded ... rules from Supabase` and `Cloud sync complete`, and re-enable the timer:
+
+```bash
+sudo systemctl start stockwatch.service
+sudo journalctl -u stockwatch.service -n 50 --no-pager
+sudo systemctl start stockwatch.timer
+```
+
+### Editing without SSH
+
+Open **Supabase Table Editor → stockwatch_rules**. Add or edit rows for your `device_id`; targets are text such as `319` or `SMA_200W`. Toggle `enabled` to pause a rule. The Pi picks up changes on its next hourly run. General settings such as cooldown and feeds remain in the local configuration file.
+
+An empty cloud watchlist, or all-disabled rules, intentionally pauses price checks. It does not restore file rules. Invalid/unreachable cloud data uses the last validated cached cloud watchlist; if none has ever been downloaded, it uses the local file. The file must still be valid because it supplies general settings. Cache age is unlimited so an outage does not automatically stop monitoring; check `rule_source` to identify this condition.
+
+### Activity data for a future dashboard
+
+| Table | Contents |
+|---|---|
+| `stockwatch_rules` | Editable rule rows, keyed by device and ID |
+| `stockwatch_runs` | Start/finish timestamps, status, rule source, and per-rule JSON results |
+| `stockwatch_alerts` | Successfully recorded notifications, including pre-sync local history |
+
+Per-rule statuses include `alert_sent`, `already_notified`, `outside_range`, `cooldown`, `market_closed`, `market_clock_error`, and `error`. Results include observed price, target, quote timestamp, and percentage distance when available. This lets a dashboard explain why an hourly check did not send a notification.
+
+Completed runs are written to SQLite first. Failed uploads remain in an outbox; retries use stable primary keys to avoid duplicate cloud rows. Each run uploads up to 100 pending runs and 200 old alerts. Outboxes are scoped to the project/device so changing projects does not accidentally transfer queued runs to another project. Existing local notification history is imported separately for the configured destination. Keep the device ID and SQLite database together; use a new device ID if starting with a fresh database.
+
+Both SQLite and Supabase history currently have no automatic retention policy. Plan cleanup/retention before collecting large watchlists for long periods. Startup failures before the monitoring loop and power loss are not recorded as completed runs; a dashboard should flag overdue check-ins, rather than assume the last successful status means the Pi is online. Cloud failures appear in the Pi's journal; they do not make a successful local monitoring cycle fail.
+
+### Access control
+
+All three tables have RLS enabled and explicit grants for `service_role` only. Anonymous and authenticated browser roles have no access or permissive policies. Supabase's Table Editor remains available to project administrators. A future Netlify dashboard needs an authenticated server-side API or explicitly designed owner-scoped RLS policies; never embed the secret key in frontend code. A secret key has project-wide privilege, so prefer a dedicated project for this monitor.
+
+No dashboard or external downtime notification service is included yet.
+
+## Maintenance
+
+```bash
+journalctl -u stockwatch.service --since today
+systemctl list-timers stockwatch.timer
+sudo systemctl disable --now stockwatch.timer
+```
+
+The database is `/var/lib/stockwatch/monitor.sqlite3`. To back it up, stop the timer, wait for the active service to finish, copy the database, then restart the timer. Existing alert state is preserved when upgrading; the new local tables are added automatically.
+
+To change frequency, edit the timer (`OnCalendar=*-*-* 00/2:00:00` means every two hours), run `sudo systemctl daemon-reload`, then restart the timer. The Pi connects outward to cloud APIs; no new inbound port is needed.
+
+## Verification and limitations
+
+Tests cover monitoring behavior plus cloud fallback, empty/invalid watchlists, durable retries, alert synchronization cursors, destination isolation, and non-overwriting imports. Mocked cloud tests do not prove live Supabase connectivity or SQL grants: complete the live setup check above. Actual market-data coverage and notification delivery depend on your accounts.
+
+Official references:
+- [Alpaca historical stock bars](https://docs.alpaca.markets/us/v1.4.2/reference/stockbars)
+- [Alpaca historical crypto bars](https://docs.alpaca.markets/us/reference/cryptobars-1)
+- [Supabase API security](https://supabase.com/docs/guides/api/securing-your-api)
+- [Supabase API keys](https://supabase.com/docs/guides/getting-started/api-keys)

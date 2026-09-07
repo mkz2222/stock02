@@ -4,3 +4,7 @@ state/
 *.lock
 .env
 stockwatch.env
+*.ppk
+*.pem
+.env.*
+!*.env.example
