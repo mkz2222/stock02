@@ -8,3 +8,4 @@ stockwatch.env
 *.pem
 .env.*
 !*.env.example
+.netlify/

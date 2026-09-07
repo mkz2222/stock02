@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f3">
+  <meta name="description" content="Recent Stockwatch monitoring runs and alerts.">
+  <title>Stockwatch · Activity</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="Stockwatch home"><span class="brand-mark" aria-hidden="true">s<span>·</span></span>stockwatch<span class="brand-label">ACTIVITY</span></a><span class="public-label">Public dashboard</span></header>
+  <main>
+    <div class="heading"><div><p class="eyebrow">THE MONITOR, AT A GLANCE</p><h1>A little peace of mind.</h1><p class="intro">Recent checks and notifications from your market monitor.</p></div><button id="refresh" type="button" aria-label="Refresh activity">↻ <span>Refresh</span></button></div>
+    <div class="connection"><span id="connection" role="status" aria-live="polite">Connecting to activity…</span><span>Updates every minute</span></div>
+    <p id="error" class="error-banner" role="alert" hidden></p>
+    <section class="overview" aria-label="Activity overview">
+      <div><p>LAST CHECK-IN</p><strong id="last-check">—</strong><span id="last-detail">Waiting for data</span></div>
+      <div><p>RECENT RUNS</p><strong id="run-count">—</strong><span id="run-detail">Latest 30 checks</span></div>
+      <div><p>RECENT ALERTS</p><strong id="alert-count">—</strong><span>Latest 30 notifications</span></div>
+    </section>
+    <div class="columns">
+      <section class="panel" aria-labelledby="runs-title"><div class="section-heading"><div><p class="eyebrow">MONITOR HISTORY</p><h2 id="runs-title">Recent runs</h2></div><label class="filter-label"><span class="sr-only">Filter runs</span><select id="filter"><option value="all">All runs</option><option value="error">With errors</option><option value="success">Successful</option></select></label></div><div id="runs" aria-busy="true"><p class="empty">Loading recent runs…</p></div></section>
+      <section class="panel alerts-panel" aria-labelledby="alerts-title"><div class="section-heading"><div><p class="eyebrow">NOTIFICATION FEED</p><h2 id="alerts-title">Recent alerts</h2></div><span class="feed-dot" aria-hidden="true"></span></div><div id="alerts" aria-busy="true"><p class="empty">Loading recent alerts…</p></div></section>
+    </div>
+    <footer><span><span class="footer-dot">●</span> Stockwatch · Quietly keeping watch.</span><span>Times shown in <span id="timezone">your local timezone</span></span></footer>
+  </main>
+</body>
+</html>
+

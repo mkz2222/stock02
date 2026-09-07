@@ -111,6 +111,20 @@ A successful oneshot service becomes inactive after finishing; the timer stays a
 
 ## Supabase setup
 
+The hosted database was provisioned on 2026-09-07 in **P01_stock**
+(`rcmpuisjnyhbeqccokhh`, US East Ohio), using the recorded migration
+`create_stockwatch_tables` from `supabase/schema.sql`.
+[Open the Table Editor](https://supabase.com/dashboard/project/rcmpuisjnyhbeqccokhh/editor).
+For this project, skip step 1 and use
+`SUPABASE_URL=https://rcmpuisjnyhbeqccokhh.supabase.co` in step 2.
+The tables are empty; sample watchlist rules were not imported. Configure the
+server secret key on the Pi and import its actual rules before enabling cloud sync.
+Live service-role inserts, reads, and updates were verified in a rolled-back
+transaction. All 18 local tests passed. Pi-to-Supabase REST connectivity still
+requires the setup check below. The security advisor reports only informational
+"RLS Enabled No Policy" notices, expected for this server-only access model
+([advisor explanation](https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy)).
+
 1. Choose a Supabase project and run `supabase/schema.sql` once in its SQL Editor. This is a bootstrap script, not a recorded CLI migration. It creates only the three `stockwatch_*` tables; if those names already exist, review them before applying.
 2. In `/etc/stockwatch.env`, add:
 
@@ -169,7 +183,7 @@ Both SQLite and Supabase history currently have no automatic retention policy. P
 
 All three tables have RLS enabled and explicit grants for `service_role` only. Anonymous and authenticated browser roles have no access or permissive policies. Supabase's Table Editor remains available to project administrators. A future Netlify dashboard needs an authenticated server-side API or explicitly designed owner-scoped RLS policies; never embed the secret key in frontend code. A secret key has project-wide privilege, so prefer a dedicated project for this monitor.
 
-No dashboard or external downtime notification service is included yet.
+A public, read-only dashboard for recent runs and alerts is included in `dashboard/`, with a Netlify Function in `netlify/functions/`. See [Netlify deployment instructions](DEPLOY-DASHBOARD.md). No external downtime notification service is included.
 
 ## Maintenance
 
