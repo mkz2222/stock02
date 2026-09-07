@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Hourly, read-only market alerts. Python 3.11+, standard library only."""
-from __future__ import annotations
+"""Hourly market alerts. Python 3.11+ standard library; 3.6+ with legacy deps."""
 
 import argparse
 import hashlib
@@ -13,19 +12,36 @@ import re
 import sqlite3
 import sys
 import time
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import toml as tomllib
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from dateutil.tz import gettz as ZoneInfo
 
 UTC = timezone.utc
 LOG = logging.getLogger("stockwatch")
 
 
 def timestamp(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # Alpaca can return nanoseconds; datetime stores microseconds.
+    normalized = value.replace("Z", "+00:00")
+    normalized = re.sub(r"(\.\d{6})\d+", r"\1", normalized)
+    if hasattr(datetime, "fromisoformat"):
+        parsed = datetime.fromisoformat(normalized)
+    else:
+        normalized = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", normalized)
+        fmt = "%Y-%m-%dT%H:%M:%S" + (".%f" if "." in normalized else "") + "%z"
+        parsed = datetime.strptime(normalized, fmt)
+    if parsed.tzinfo is None:
+        raise ValueError("Quote/bar timestamp must include a timezone")
+    return parsed
 
 
 def positive(value):
@@ -195,7 +211,7 @@ def sma(bars, count, boundary, period):
 
 def database(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(str(path))
     db.executescript("""
         CREATE TABLE IF NOT EXISTS state (id TEXT PRIMARY KEY, fingerprint TEXT,
             armed INTEGER NOT NULL, last_sent REAL);

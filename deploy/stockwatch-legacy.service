@@ -1,0 +1,21 @@
+[Unit]
+Description=Stock and crypto price alerts (legacy Raspberry Pi)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=stockwatch
+Group=stockwatch
+WorkingDirectory=/opt/stockwatch
+EnvironmentFile=/etc/stockwatch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/stockwatch/vendor
+ExecStart=/usr/local/bin/python3.6 /opt/stockwatch/monitor.py --rules /etc/stockwatch/watchlist.md --db /var/lib/stockwatch/monitor.sqlite3
+UMask=0077
+TimeoutStartSec=45min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/stockwatch

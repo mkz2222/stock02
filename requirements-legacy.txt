@@ -1,0 +1,4 @@
+# Only needed for Python 3.6–3.10. Install in the application vendor directory.
+toml==0.10.2
+python-dateutil==2.8.2
+six==1.16.0

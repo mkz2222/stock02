@@ -2,6 +2,8 @@
 
 Python 3.11+，仅标准库，SQLite 保存状态。systemd 每小时启动一次，读取文件、检查、发送提醒后退出。程序只读取行情，不下单。
 
+旧版 Raspberry Pi 的 Python 3.6 也支持，需单独安装 `requirements-legacy.txt` 中的依赖；使用 `deploy/stockwatch-legacy.service`，详见文末。
+
 ## 第一版行为
 
 - 每次读取指定的 `watchlist.md`（一个 TOML 代码块）或 `.txt`（直接写 TOML）。不扫描其他文件，不用 AI 解释自由文本。路径固定，避免读错文件。
@@ -109,3 +111,30 @@ journalctl -u stockwatch.service -n 100 --no-pager
 ## 验证范围
 
 测试覆盖配置校验、200 周 SMA、缺失周线、重启去重、再次进入和冷却、通知失败、dry-run、历史分页、过期行情和美股接口失败隔离。未配置真实 API 凭据时无法验证账户数据权限、200 周历史覆盖或实际手机送达。systemd 文件需要在树莓派 Linux 上完成实际启用验证。
+
+## 旧版 Raspberry Pi 部署
+
+已在 Raspbian Stretch、ARMv7、Python 3.6.5、systemd 232 上通过 10 项测试和规则校验。兼容改动不升级系统 Python；长期维护建议迁移到更新的 Raspberry Pi OS。
+
+在应用独立目录安装固定版本依赖：
+
+```bash
+sudo /usr/local/bin/python3.6 -m pip install --target /opt/stockwatch/vendor -r requirements-legacy.txt
+sudo install -d -m 0700 -o stockwatch -g stockwatch /var/lib/stockwatch
+sudo install -m 0644 deploy/stockwatch-legacy.service /etc/systemd/system/stockwatch.service
+sudo systemctl daemon-reload
+```
+
+旧版 unit 使用 `/usr/local/bin/python3.6` 和 `/opt/stockwatch/vendor`，手动创建状态目录，避免 systemd 232 不支持 `StateDirectory` 的问题。其余配置路径与现代版本相同。
+
+部署后先在 Pi 的交互式 SSH 终端填写凭据和真实目标，不要把密钥粘贴到聊天或提交到 Git：
+
+```bash
+sudo nano /etc/stockwatch.env
+sudo nano /etc/stockwatch/watchlist.md
+sudo systemctl start stockwatch.service
+sudo journalctl -u stockwatch.service -n 50 --no-pager
+sudo systemctl enable --now stockwatch.timer
+```
+
+密钥文件仅 root 可读，systemd 会加载。示例凭据和示例目标尚未替换时，应保持 timer 禁用。旧版 systemd 的临时试运行命令请省略现代示例中的 `--collect` 和 `StateDirectory`，改用 `-p Environment=PYTHONPATH=/opt/stockwatch/vendor` 及实际 Python 3.6 路径。

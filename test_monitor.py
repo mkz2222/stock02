@@ -94,6 +94,13 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(get.call_count, 2)
 
+    def test_nanosecond_timestamp_and_offset(self):
+        expected = datetime(2026, 9, 7, 12, 0, 0, 123456, tzinfo=m.UTC)
+        self.assertEqual(m.timestamp("2026-09-07T12:00:00.123456789Z"), expected)
+        self.assertEqual(m.timestamp("2026-09-07T08:00:00.123456-04:00"), expected)
+        with self.assertRaises(ValueError):
+            m.timestamp("2026-09-07T12:00:00")
+
     def test_stock_clock_failure_does_not_block_crypto(self):
         class Provider:
             def stock_open(inner):
