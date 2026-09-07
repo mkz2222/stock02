@@ -1,0 +1,13 @@
+[settings]
+cooldown_hours = 24
+max_quote_age_minutes = 20
+stock_feed = "iex"
+crypto_location = "us"
+
+[[watch]]
+id = "eth-target"
+market = "crypto"
+symbol = "ETH/USD"
+target = 2000
+band_percent = 5
+note = "示例价格，请修改"

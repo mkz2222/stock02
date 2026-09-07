@@ -1,0 +1,6 @@
+__pycache__/
+state/
+*.sqlite3*
+*.lock
+.env
+stockwatch.env

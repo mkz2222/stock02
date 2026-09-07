@@ -1,0 +1,12 @@
+[Unit]
+Description=Check watchlist every hour
+
+[Timer]
+OnBootSec=2min
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1min
+Unit=stockwatch.service
+
+[Install]
+WantedBy=timers.target
