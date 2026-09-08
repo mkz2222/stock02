@@ -73,7 +73,7 @@ sudo useradd --system --user-group --home-dir /var/lib/stockwatch --no-create-ho
 sudo install -d /opt/stockwatch
 sudo install -d -m 0750 -o root -g stockwatch /etc/stockwatch
 sudo install -d -m 0700 -o stockwatch -g stockwatch /var/lib/stockwatch
-sudo install -m 0644 monitor.py cloud_sync.py providers.py /opt/stockwatch/
+sudo install -m 0644 monitor.py cloud_sync.py providers.py rsi_monitor.py /opt/stockwatch/
 sudo install -m 0640 -o root -g stockwatch watchlist.md /etc/stockwatch/watchlist.md
 sudo install -m 0600 deploy/stockwatch.env.example /etc/stockwatch.env
 sudo install -m 0644 deploy/stockwatch.service deploy/stockwatch.timer /etc/systemd/system/
@@ -234,3 +234,30 @@ Alpaca-bound fingerprints. Prices and provider-specific SMA values can differ
 between exchanges. The source is recorded in run results and the Pi journal.
 API keys stay on the Pi. Public display licensing is still subject to each
 provider's plan; API access alone is not a grant to redistribute data.
+
+## Daily RSI(14), first version
+
+Each distinct enabled crypto symbol also gets a confirmed UTC daily RSI(14)
+check, independently of its price/SMA check. Stocks are not included in this
+first version. Coinbase is preferred; Alpaca supplies a separate complete
+history if Coinbase fails. The latest 250 consecutive completed daily closes
+warm up Wilder smoothing. A flat series returns 50; all gains return 100;
+all losses return 0. Missing days fail the check rather than filling prices.
+
+Candles are persisted in SQLite `rsi_daily_candles` per provider and symbol.
+At the next daily boundary, the last three days are fetched and merged; within
+that day the cached history is reused. A five-minute UTC-midnight grace period
+allows the final candle to settle. The existing hourly timer determines when
+this first runs after the grace period. RSI is not a live intraday estimate.
+
+RSI strictly below 30 sends one notification on first observation/entry. Exactly
+30 or above does not send; it rearms a later below-30 episode. Persistent
+`rsi_alert_state` prevents repeats across hourly checks, restarts, duplicate
+watchlist symbols, and provider changes. A notification failure leaves the day
+unprocessed for retry; external timeout-after-delivery can still duplicate a
+message. Existing price notifications remain independently enabled.
+
+RSI results are included in `stockwatch_runs.results` with indicator, rsi,
+period, timeframe, source, and closed_at fields. They require no new Supabase
+tables. Notifications use the existing alert outbox/sync. The website-only
+repository displays RSI in run summaries and expanded details.

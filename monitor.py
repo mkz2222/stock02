@@ -427,6 +427,9 @@ def main():
                 started = datetime.now(UTC).isoformat()
                 results = []
                 code = run(settings, rules, db, provider, send, args.dry_run, results)
+                from rsi_monitor import run_daily_rsi
+                rsi_code = run_daily_rsi(rules, db, provider, send, results, args.dry_run)
+                code = max(code, rsi_code)
                 if not args.dry_run:
                     event = {"id": str(uuid.uuid4()), "device_id": os.environ.get("STOCKWATCH_DEVICE_ID", "raspberrypi"),
                              "started_at": started, "finished_at": datetime.now(UTC).isoformat(),
