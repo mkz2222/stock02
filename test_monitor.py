@@ -80,6 +80,8 @@ class MonitorTests(unittest.TestCase):
         class Provider:
             def price(inner, *args):
                 return 100, datetime.now(m.UTC) - timedelta(hours=2)
+            def source(inner, *args):
+                return "test"
         settings, _ = m.read_rules("watchlist.md")
         self.assertEqual(m.run(settings, [self.rule], self.db, Provider(), self.sent.append), 1)
         self.assertEqual(self.sent, [])
@@ -114,6 +116,34 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(m.run(settings, [stock, self.rule], self.db, Provider(), self.sent.append), 1)
         self.assertEqual(len(self.sent), 1)
 
+
+
+class CryptoFreshnessTests(unittest.TestCase):
+    def provider(self):
+        with patch.dict('os.environ', {'APCA_API_KEY_ID':'test','APCA_API_SECRET_KEY':'test'}):
+            return m.Alpaca({'stock_feed':'iex','crypto_location':'us','max_quote_age_minutes':20})
+
+    def test_stale_trade_uses_fresh_quote_midpoint(self):
+        provider = self.provider()
+        old = (datetime.now(m.UTC)-timedelta(hours=2)).isoformat()
+        fresh = datetime.now(m.UTC).isoformat()
+        with patch.object(provider,'get',side_effect=[{'trades':{'ETH/USD':{'p':100,'t':old}}}, {'quotes':{'ETH/USD':{'bp':99.9,'ap':100.1,'t':fresh}}}]):
+            price, quoted = provider.price('crypto','ETH/USD')
+        self.assertEqual(price,100)
+        self.assertEqual(quoted,m.timestamp(fresh))
+
+    def test_stale_or_wide_quote_is_rejected(self):
+        old = (datetime.now(m.UTC)-timedelta(hours=2)).isoformat()
+        for quote in [{'bp':99.9,'ap':100.1,'t':old}, {'bp':90,'ap':110,'t':datetime.now(m.UTC).isoformat()}]:
+            provider = self.provider()
+            with patch.object(provider,'get',side_effect=[{'trades':{'ETH/USD':{'p':100,'t':old}}},{'quotes':{'ETH/USD':quote}}]):
+                with self.assertRaises(ValueError): provider.price('crypto','ETH/USD')
+
+    def test_fresh_trade_does_not_request_quote(self):
+        provider=self.provider()
+        with patch.object(provider,'get',return_value={'trades':{'ETH/USD':{'p':100,'t':datetime.now(m.UTC).isoformat()}}}) as get:
+            self.assertEqual(provider.price('crypto','ETH/USD')[0],100)
+            self.assertEqual(get.call_count,1)
 
 if __name__ == "__main__":
     unittest.main()

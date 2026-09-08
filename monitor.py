@@ -68,11 +68,13 @@ def validate_config(config, allow_empty=False):
     if set(config) - {"settings", "watch"}:
         raise ValueError("Unknown top-level configuration key")
     settings = {"cooldown_hours": 24, "max_quote_age_minutes": 20,
-                "stock_feed": "iex", "crypto_location": "us"}
+                "stock_feed": "iex", "crypto_location": "us", "stock_extended_hours": True}
     supplied = config.get("settings", {})
     if set(supplied) - set(settings):
         raise ValueError("Unknown settings key")
     settings.update(supplied)
+    if not isinstance(settings["stock_extended_hours"], bool):
+        raise ValueError("stock_extended_hours must be true or false")
     for key in ("cooldown_hours", "max_quote_age_minutes"):
         settings[key] = positive(settings[key])
     if settings["stock_feed"] not in ("iex", "sip"):
@@ -162,6 +164,26 @@ class Alpaca:
     def price(self, market, symbol):
         suffix = "/trades/latest" if market == "stock" else "/latest/trades"
         trade = self.get(self.base(market) + suffix, self.params(market, symbol))["trades"].get(symbol)
+        if market == "crypto":
+            now = datetime.now(UTC)
+            limit = self.settings.get("max_quote_age_minutes", 20) * 60
+            age = (now - timestamp(trade["t"])).total_seconds() if trade else None
+            if age is None or age > limit:
+                quote = self.get(self.base(market) + "/latest/quotes",
+                                 self.params(market, symbol)).get("quotes", {}).get(symbol)
+                if not quote:
+                    raise ValueError("No fresh trade and no bid/ask quote available")
+                bid, ask = positive(quote["bp"]), positive(quote["ap"])
+                if bid > ask or (ask - bid) / ((ask + bid) / 2) > 0.01:
+                    raise ValueError("Invalid or wider-than-1% crypto bid/ask spread")
+                quoted = timestamp(quote["t"])
+                quote_age = (datetime.now(UTC) - quoted).total_seconds()
+                if quote_age < -60 or quote_age > limit:
+                    raise ValueError("Crypto trade age={}s; bid/ask age={:.0f}s exceeds freshness bounds".format(
+                        "missing" if age is None else round(age), quote_age))
+                LOG.warning("%s trade age=%ss; using fresh bid/ask midpoint (age=%.0fs)",
+                            symbol, "missing" if age is None else round(age), quote_age)
+                return (bid + ask) / 2, quoted
         if not trade:
             raise ValueError("No latest trade available")
         return positive(trade["p"]), timestamp(trade["t"])
@@ -274,9 +296,15 @@ def notifier():
 
 def evaluate(db, rule, source, price, target, quoted, now, cooldown, send, dry_run):
     identity = {k: rule[k] for k in ("market", "symbol", "target", "band_percent")}
-    identity["source"] = source
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     row = db.execute("SELECT fingerprint,armed,last_sent FROM state WHERE id=?", (rule["id"],)).fetchone()
+    if row and row[0] != fingerprint:
+        # Adopt the previous provider-bound identity without resetting cooldown.
+        for legacy_source in ("Alpaca/iex", "Alpaca/sip", "Alpaca/us", "Alpaca/us-1", "Alpaca/eu-1", source):
+            legacy = dict(identity, source=legacy_source)
+            if row[0] == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest():
+                row = (fingerprint, row[1], row[2])
+                break
     armed, last = (bool(row[1]), row[2]) if row and row[0] == fingerprint else (True, None)
     band = rule["band_percent"] / 100
     inside = target * (1 - band) <= price <= target * (1 + band)
@@ -330,18 +358,24 @@ def run(settings, rules, db, provider, send, dry_run=False, results=None):
         try:
             now = datetime.now(UTC)
             key = (rule["market"], rule["symbol"])
-            if key not in quotes:
-                quotes[key] = provider.price(*key)
-            price, quoted = quotes[key]
+            if hasattr(provider, "observation"):
+                price, quoted, target, source = provider.observation(rule, db, now)
+            else:
+                if key not in quotes:
+                    quotes[key] = provider.price(*key)
+                price, quoted = quotes[key]
+                target = target_value(rule, provider, db, now)
+                source = provider.source(rule["market"])
+            now = datetime.now(UTC)
             age = (now - quoted).total_seconds()
             if age < -60 or age > settings["max_quote_age_minutes"] * 60:
-                raise ValueError("Quote is stale or timestamp is in the future")
-            target = target_value(rule, provider, db, now)
-            LOG.info("%s price=%.4f target=%.4f", rule["id"], price, target)
+                raise ValueError("Quote age={:.0f}s outside allowed -60..{:.0f}s; timestamp={}".format(
+                    age, settings["max_quote_age_minutes"] * 60, quoted.isoformat()))
+            LOG.info("%s (%s) source=%s price=%.4f target=%.4f", rule["id"], rule["symbol"], source, price, target)
             result.update(price=price, target=target, quoted_at=quoted.isoformat(),
                           distance_percent=(price / target - 1) * 100,
-                          source=provider.source(rule["market"]))
-            result["status"] = evaluate(db, rule, provider.source(rule["market"]), price, target, quoted,
+                          source=source)
+            result["status"] = evaluate(db, rule, source, price, target, quoted,
                                         now, settings["cooldown_hours"], send, dry_run)
         except Exception as exc:
             result.update(status="error", error=str(exc))
@@ -388,7 +422,8 @@ def main():
                 rule_source = "file"
                 if cloud:
                     settings, rules, rule_source = cloud.load_rules(settings, rules, validate_config)
-                provider = Alpaca(settings)
+                from providers import ProviderRouter
+                provider = ProviderRouter(settings)
                 started = datetime.now(UTC).isoformat()
                 results = []
                 code = run(settings, rules, db, provider, send, args.dry_run, results)

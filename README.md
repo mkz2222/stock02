@@ -15,11 +15,11 @@ Python 3.11+ uses the standard library only. Python 3.6–3.10 needs the pinned 
 
 A target of 100 with `band_percent = 5` triggers between 95 and 105, including boundaries. An initial observation inside the range triggers once. Remaining inside does not trigger again, even after 24 hours. An observed exit rearms the rule; a subsequent entry can alert after the 24-hour cooldown. An entry during cooldown is deferred while the price remains inside.
 
-State survives restarts. Changing the symbol, market, target, band, or data source resets that rule's state. Changing the note does not. Use a new ID for an unrelated rule; deleting a rule does not erase its historical state.
+State survives restarts. Changing the symbol, market, target, or band resets that rule's state. Automatic provider switches preserve alert state and cooldown. Changing the note does not. Use a new ID for an unrelated rule; deleting a rule does not erase its historical state.
 
 Hourly polling can miss brief touches between checks. Network timeouts after a notification is accepted can cause a duplicate on retry; exactly-once delivery across an external service and SQLite is not guaranteed.
 
-Stocks are checked only when Alpaca's paper API clock confirms an open regular session. Crypto is checked around the clock. Stale quotes and insufficient history are rejected. One rule failing does not stop the other rules.
+Stocks are checked on weekdays from 04:00 to 20:00 New York time by default. An available Alpaca trading calendar excludes holidays; if it is unavailable, the weekday window and strict quote freshness checks apply. Set `stock_extended_hours = false` to use the 09:30–16:00 window. These windows do not themselves establish that an exchange is open. Crypto is checked around the clock. If its latest trade is missing or stale, the monitor tries a fresh bid/ask midpoint from the same Alpaca location. Crossed quotes and spreads above 1% are rejected. The same freshness limit applies to this fallback; the midpoint is an indicative price, not an executed trade. Logs identify fallback use and data age. Stale quotes and insufficient history are rejected. One rule failing does not stop the other rules.
 
 ## Watchlist
 
@@ -73,7 +73,7 @@ sudo useradd --system --user-group --home-dir /var/lib/stockwatch --no-create-ho
 sudo install -d /opt/stockwatch
 sudo install -d -m 0750 -o root -g stockwatch /etc/stockwatch
 sudo install -d -m 0700 -o stockwatch -g stockwatch /var/lib/stockwatch
-sudo install -m 0644 monitor.py cloud_sync.py /opt/stockwatch/
+sudo install -m 0644 monitor.py cloud_sync.py providers.py /opt/stockwatch/
 sudo install -m 0640 -o root -g stockwatch watchlist.md /etc/stockwatch/watchlist.md
 sudo install -m 0600 deploy/stockwatch.env.example /etc/stockwatch.env
 sudo install -m 0644 deploy/stockwatch.service deploy/stockwatch.timer /etc/systemd/system/
@@ -95,7 +95,7 @@ sudo nano /etc/stockwatch.env
 sudo nano /etc/stockwatch/watchlist.md
 ```
 
-Use Alpaca **paper-account** API credentials for `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. The program does not place orders.
+Set `TWELVE_API_KEY` in `/etc/stockwatch.env` for the preferred stock feed. Coinbase public crypto data needs no key. Use Alpaca **paper-account** API credentials for `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. The program does not place orders.
 
 For Telegram, set `NOTIFY_CHANNEL=telegram`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. Create a bot with official @BotFather, message it `/start`, and obtain your chat ID through its Bot API `getUpdates` response. For Pushover, set `NOTIFY_CHANNEL=pushover`, `PUSHOVER_APP_TOKEN`, and `PUSHOVER_USER_KEY`.
 
@@ -206,3 +206,31 @@ Official references:
 - [Alpaca historical crypto bars](https://docs.alpaca.markets/us/reference/cryptobars-1)
 - [Supabase API security](https://supabase.com/docs/guides/api/securing-your-api)
 - [Supabase API keys](https://supabase.com/docs/guides/getting-started/api-keys)
+
+## Preferred and backup market data
+
+Stocks use Twelve Data first, then Alpaca. Crypto uses Coinbase Exchange first,
+then Alpaca. A missing key, rejected request, stale price, or insufficient history
+causes a whole-observation retry: the backup supplies both price and any SMA
+history. A notification failure does not trigger provider failover.
+
+Twelve Data uses `TWELVE_API_KEY` (also accepts `TWELVE_DATA_API_KEY`), requests
+split-adjusted daily/weekly history, and spaces requests eight seconds apart to
+respect the free tier's per-minute budget. Daily credits and endpoint access
+still depend on the plan. Coinbase daily candles are fetched in bounded batches;
+weekly bars use complete Monday–Sunday UTC weeks and reject missing days.
+History caches are isolated by provider, instrument, and target.
+
+Extended stock checks request Twelve Data `prepost=true` outside regular hours.
+Its documented real-time extended session is 07:00–20:00 ET on Pro or higher.
+Alpaca remains the fallback using the configured `iex` or `sip` feed; available
+coverage depends on the account. Closed/stale data is never relabeled as current.
+The timer still runs hourly, so it does not check the exact 16:00 close or every
+movement during extended hours. Today being closed cannot validate a future
+live extended-hours quote; verify timestamps and sources during the next session.
+
+Switches preserve existing notification state, including migration of the old
+Alpaca-bound fingerprints. Prices and provider-specific SMA values can differ
+between exchanges. The source is recorded in run results and the Pi journal.
+API keys stay on the Pi. Public display licensing is still subject to each
+provider's plan; API access alone is not a grant to redistribute data.
